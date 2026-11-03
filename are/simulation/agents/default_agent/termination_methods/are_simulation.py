@@ -8,7 +8,7 @@
 import logging
 from functools import partial
 
-from are.simulation.agents.agent_log import ToolCallLog
+from are.simulation.agents.agent_log import ObservationLog, ToolCallLog
 from are.simulation.agents.default_agent.base_agent import RunningState, TerminationStep
 from are.simulation.agents.default_agent.tools.json_action_executor import (
     JsonActionExecutor,
@@ -92,7 +92,13 @@ def termination_condition_are_simulation(agent, termination_tool_names: list[str
     """
     tool_call = agent.get_last_log_of_type(ToolCallLog)
     tool_name = tool_call.tool_name if tool_call else ""
-    if isinstance(agent.action_executor, JsonActionExecutor):
+    observation = agent.get_last_log_of_type(ObservationLog)
+    successful = (
+        tool_call is not None
+        and observation is not None
+        and agent.logs.index(observation) > agent.logs.index(tool_call)
+    )
+    if isinstance(agent.action_executor, JsonActionExecutor) and successful:
         if any(
             tool_name.strip() == agent.get_original_tool_name(target_tool_name).strip()
             for target_tool_name in termination_tool_names
