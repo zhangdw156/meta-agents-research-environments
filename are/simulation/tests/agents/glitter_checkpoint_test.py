@@ -88,3 +88,24 @@ def test_restore_pending_format_retry_keeps_prompt_and_retry_count():
     assert tool.calls == ["success"]
     assert other.pending_step is None
     assert other.iterations == saved["iterations"] + 1
+
+
+def test_prompt_recovery_rebuilds_history_after_context_error():
+    from are.simulation.agents.llm.exceptions import PromptTooLongException
+
+    prompts = []
+
+    def engine(prompt, **kwargs):
+        prompts.append(copy.deepcopy(prompt))
+        if len(prompts) == 1:
+            raise PromptTooLongException("context limit")
+        return action("success")
+
+    tool = Reply()
+    agent = make(engine, tool)
+    agent.handle_prompt_too_long = True
+    agent.run("reply")
+    assert tool.calls == ["success"]
+    assert len(prompts) == 2
+    assert "PromptTooLongException" in str(prompts[1])
+    assert agent.pending_step is None

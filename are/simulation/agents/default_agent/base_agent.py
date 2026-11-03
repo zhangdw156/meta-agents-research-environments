@@ -837,6 +837,7 @@ class BaseAgent:
                 )
                 break
             except PromptTooLongException as e:
+                self.pending_step = None
                 if not self.handle_prompt_too_long:
                     # Raise handle_prompt_too_long exception
                     raise e
