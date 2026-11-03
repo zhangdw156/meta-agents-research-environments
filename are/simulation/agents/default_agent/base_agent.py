@@ -381,6 +381,8 @@ class BaseAgent:
 
         self.custom_state = {}
         self.task = ""
+        # A request boundary can be restored without replaying completed actions.
+        self.pending_step: dict | None = None
         self.attachments = []
 
         self.handle_prompt_too_long = handle_prompt_too_long
@@ -552,6 +554,7 @@ class BaseAgent:
         :param kwargs: dict[str, Any] - Additional arguments for the agent.
         """
         self.initialized = True
+        self.pending_step = None
         self.logs = []
         self.iterations = 0
         self.planning_counter = (
@@ -605,17 +608,22 @@ class BaseAgent:
         Perform one step in the ReAct framework: the agent thinks, acts, and observes the result.
         The errors are raised here, they are caught and logged in the run() method.
         """
-        # 1. Build the history messages from the logs to prompt the LLM
-        agent_memory = self.build_history_from_logs(
-            exclude_log_types=["tool_call", "rationale", "action"]
-        )
-        prompt = agent_memory.copy()
-
-        self.append_agent_log(
-            LLMInputLog(
-                content=prompt, timestamp=self.make_timestamp(), agent_id=self.agent_id
+        if self.pending_step is None:
+            # 1. Build the history messages from the logs to prompt the LLM
+            agent_memory = self.build_history_from_logs(
+                exclude_log_types=["tool_call", "rationale", "action"]
             )
-        )
+            prompt = agent_memory.copy()
+
+            self.append_agent_log(
+                LLMInputLog(
+                    content=prompt, timestamp=self.make_timestamp(), agent_id=self.agent_id
+                )
+            )
+
+            self.pending_step = {"prompt": prompt, "format_try_count": 0}
+        else:
+            prompt = self.pending_step["prompt"]
 
         # 2. Call the model to generate the next rationale and action
         # We don't put empty string as a default value, because it can cause an infinite loop if Metagen returns an empty string
@@ -626,7 +634,7 @@ class BaseAgent:
                 raise ValueError("pause_env is not set")
             self.pause_env()
 
-        format_try_count: int = 0
+        format_try_count: int = self.pending_step["format_try_count"]
         llm_output = None
         metadata = None
 
@@ -648,6 +656,7 @@ class BaseAgent:
                             f"The LLM output was not formatted correctly: {llm_output}"
                         )
                     )
+                self.pending_step["format_try_count"] = format_try_count
                 llm_response = self.llm_engine(
                     prompt,
                     stop_sequences=["<end_action>", "Observation:"],
@@ -665,6 +674,7 @@ class BaseAgent:
                 if format_try_count > self.invalid_format_retries:
                     break
 
+        self.pending_step = None
         self.logger.debug("===== Output message of the LLM: =====")
         self.logger.debug(llm_output)
 
@@ -780,26 +790,28 @@ class BaseAgent:
             try:
                 self.logger.debug(f"Starting iteration {self.iterations}...")
 
-                self.append_agent_log(
-                    StepLog(
-                        iteration=self.iterations,
-                        timestamp=self.make_timestamp(),
-                        agent_id=self.agent_id,
+                # A restored request already owns its pre-step notifications.
+                if self.pending_step is None:
+                    self.append_agent_log(
+                        StepLog(
+                            iteration=self.iterations,
+                            timestamp=self.make_timestamp(),
+                            agent_id=self.agent_id,
+                        )
                     )
-                )
 
-                if self.stop_event.is_set():
-                    raise AgentStoppedException("Agent stopped.")
+                    if self.stop_event.is_set():
+                        raise AgentStoppedException("Agent stopped.")
 
-                # Execute a pre_step() function if it exists
-                for conditional_step in self.conditional_pre_steps:
-                    if conditional_step.condition is None or conditional_step.condition(
-                        self
-                    ):
-                        conditional_step.function(self)
+                    # Execute a pre_step() function if it exists
+                    for conditional_step in self.conditional_pre_steps:
+                        if conditional_step.condition is None or conditional_step.condition(
+                            self
+                        ):
+                            conditional_step.function(self)
 
-                if self.stop_event.is_set():
-                    raise AgentStoppedException("Agent stopped.")
+                    if self.stop_event.is_set():
+                        raise AgentStoppedException("Agent stopped.")
 
                 # Execute the step()
                 self.step()
@@ -837,6 +849,7 @@ class BaseAgent:
                 self.custom_state["running_state"] = RunningState.FAILED
                 break
             except Exception as e:
+                self.pending_step = None
                 self.log_error(e)
             finally:
                 if (
